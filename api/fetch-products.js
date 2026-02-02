@@ -195,14 +195,10 @@ async function extractProducts(html) {
 }
 
 async function formatProducts(products) {
-    const formattedProducts = [];
-    for (const product of products) {
-        if (product && product.sku) {
-            const formatted = await formatProduct(product);
-            formattedProducts.push(formatted);
-        }
-    }
-    return formattedProducts;
+    const filtered = products.filter(product => product && product.sku);
+    return await mapWithConcurrency(filtered, 6, async (product) => {
+        return await formatProduct(product);
+    });
 }
 
 async function formatProduct(product) {
@@ -338,8 +334,20 @@ function extractSellerName(product) {
     // Jumia sometimes uses 'displayName' at root level for sellers
     if (product.displayName && !product.name) return product.displayName;
     
-    // Brand as final fallback (not ideal but better than nothing)
-    if (product.brand && product.brand !== 'N/A') return product.brand;
-    
     return null;
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+    const results = new Array(items.length);
+    let index = 0;
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (index < items.length) {
+            const currentIndex = index;
+            index += 1;
+            results[currentIndex] = await worker(items[currentIndex], currentIndex);
+        }
+    });
+
+    await Promise.all(runners);
+    return results;
 }

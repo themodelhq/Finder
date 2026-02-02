@@ -162,25 +162,29 @@ class JumiaSKUFinder {
         this.showLoading('Finding products...');
         
         try {
-            for (let i = 1; i <= pages; i++) {
-                this.currentPage = i;
-                const pageUrl = url + (url.includes('?') ? '&' : '?') + 'page=' + i;
-                
-                this.updateLoadingMessage(`Fetching page ${i} of ${pages}...`);
-                
-                const products = await this.fetchProducts(pageUrl);
-                
-                if (products && products.length > 0) {
-                    this.data = [...this.data, ...products];
-                    this.updateStats();
+            const pageUrls = Array.from({ length: pages }, (_, index) => {
+                const pageNumber = index + 1;
+                return this.buildPageUrl(url, pageNumber);
+            });
+            let processed = 0;
+
+            const pageResults = await this.mapWithConcurrency(
+                pageUrls,
+                4,
+                async (pageUrl) => {
+                    processed += 1;
+                    this.currentPage = processed;
+                    this.updateLoadingMessage(`Fetching page ${processed} of ${pages}...`);
+                    return await this.fetchProducts(pageUrl);
                 }
-            }
-            
+            );
+
+            this.data = pageResults.flat().filter(Boolean);
+            await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateSKUList();
             this.renderProducts();
-            
         } catch (error) {
             console.error('Error finding products:', error);
             alert('Error finding products. Please try again.');
@@ -209,29 +213,33 @@ class JumiaSKUFinder {
         this.oos = 0;
         
         try {
-            const results = await Promise.all(
-                this.skus.map(async (sku, index) => {
-                    this.updateLoadingMessage(`Fetching SKU ${index + 1} of ${this.skus.length}...`);
-                    
+            let processed = 0;
+            const results = await this.mapWithConcurrency(
+                this.skus,
+                6,
+                async (sku) => {
+                    processed += 1;
+                    this.updateLoadingMessage(`Fetching SKU ${processed} of ${this.skus.length}...`);
+
                     try {
                         const url = `${this.domain}/catalog/?q=${sku}`;
                         const products = await this.fetchProducts(url);
-                        
+
                         if (products && products.length > 0) {
                             this.valid++;
                             return products[0];
-                        } else {
-                            this.oos++;
-                            return this.createOOSProduct(sku);
                         }
+                        this.oos++;
+                        return this.createOOSProduct(sku);
                     } catch (error) {
                         this.oos++;
                         return this.createOOSProduct(sku);
                     }
-                })
+                }
             );
-            
+
             this.data = results.filter(p => p);
+            await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateStats();
@@ -273,7 +281,12 @@ class JumiaSKUFinder {
             console.error('Vercel API error:', apiError);
             
             // Fallback to CORS proxies
-            return await this.fetchProductsWithCORS(url);
+            const products = await this.fetchProductsWithCORS(url);
+            if (products.length === 0) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+                return await this.fetchProductsWithCORS(url);
+            }
+            return products;
         }
     }
 
@@ -338,9 +351,10 @@ class JumiaSKUFinder {
                 
                 // Look for products array with better patterns
                 const productsPatterns = [
-                    /"products"\s*:\s*(\[[^\]]*?\{[\s\S]*?\}\])/,
-                    /products\s*:\s*(\[[^\]]*?\{[\s\S]*?\}\])/,
-                    /"items"\s*:\s*(\[[^\]]*?\{[\s\S]*?\}\])/
+                    /"products"\s*:\s*(\[[\s\S]*?\])\s*[,}\]]/,
+                    /products\s*:\s*(\[[\s\S]*?\])\s*[,}\]]/,
+                    /"items"\s*:\s*(\[[\s\S]*?\])\s*[,}\]]/,
+                    /items\s*:\s*(\[[\s\S]*?\])\s*[,}\]]/
                 ];
                 
                 for (const pattern of productsPatterns) {
@@ -364,6 +378,27 @@ class JumiaSKUFinder {
                         }
                     }
                 }
+            }
+
+            // Method 3: Extract from data attributes in HTML
+            const dataSkuPattern = /data-sku=["']([A-Z0-9]+)["']/g;
+            const skus = new Set();
+            let dataMatch;
+
+            while ((dataMatch = dataSkuPattern.exec(html)) !== null) {
+                skus.add(dataMatch[1]);
+            }
+
+            if (skus.size > 0) {
+                return Array.from(skus).map(sku => ({
+                    sku,
+                    name: 'Product',
+                    brand: '',
+                    prices: { price: '0', rawPrice: '0' },
+                    rating: { average: 0, totalRatings: 0 },
+                    image: '',
+                    url: `/catalog/?q=${sku}`
+                }));
             }
 
             return [];
@@ -416,7 +451,6 @@ class JumiaSKUFinder {
         if (product.shopGlobal?.displayName) return product.shopGlobal.displayName;
         if (product.shop?.name) return product.shop.name;
         if (product.shop?.displayName) return product.shop.displayName;
-        if (product.brand) return product.brand; // Fallback to brand as seller
         return null;
     }
 
@@ -546,6 +580,8 @@ class JumiaSKUFinder {
         if (this.data.length === 0) {
             this.productsGrid.innerHTML = '<p class="text-center">No products found</p>';
             this.productCount.textContent = '0';
+            this.exportBtn.textContent = '📥 Download CSV';
+            this.exportBtn.disabled = true;
             return;
         }
         
@@ -557,6 +593,8 @@ class JumiaSKUFinder {
         this.productCount.textContent = this.data.length;
         this.buildBrandFilter();
         this.buildSellerFilter();
+        this.exportBtn.textContent = '📥 Download CSV';
+        this.exportBtn.disabled = false;
         this.lazyLoadImages();
     }
 
@@ -574,16 +612,7 @@ class JumiaSKUFinder {
 
     buildSellerFilter() {
         const sellers = [...new Set(this.originalData.map(p => {
-            // Try multiple sources for seller name
-            return p.sellerName || 
-                   p.seller?.name || 
-                   p.seller?.displayName || 
-                   p.shopGlobal?.name || 
-                   p.shopGlobal?.displayName ||
-                   p.shop?.name ||
-                   p.shop?.displayName ||
-                   p.brand ||
-                   'Unknown';
+            return this.getSellerDisplayName(p) || 'Unknown';
         }).filter(s => s && s !== 'Unknown'))];
         sellers.sort();
         
@@ -604,14 +633,7 @@ class JumiaSKUFinder {
         const discount = product.prices?.discount ? parseInt(product.prices.discount) : 0;
         const rating = product.rating?.average || 0;
         // Check multiple sources for seller name
-        const sellerName = product.sellerName || 
-                          product.seller?.name || 
-                          product.seller?.displayName ||
-                          product.shopGlobal?.name || 
-                          product.shopGlobal?.displayName ||
-                          product.shop?.name ||
-                          product.shop?.displayName ||
-                          '';
+        const sellerName = this.getSellerDisplayName(product) || '';
         
         card.innerHTML = `
             <button class="product-close" data-sku="${product.sku}">×</button>
@@ -716,15 +738,7 @@ class JumiaSKUFinder {
         if (sellerValue !== '0') {
             filtered = filtered.filter(p => {
                 // Check multiple sources consistently
-                const sellerName = p.sellerName || 
-                                  p.seller?.name || 
-                                  p.seller?.displayName ||
-                                  p.shopGlobal?.name || 
-                                  p.shopGlobal?.displayName ||
-                                  p.shop?.name ||
-                                  p.shop?.displayName ||
-                                  p.brand ||
-                                  '';
+                const sellerName = this.getSellerDisplayName(p) || '';
                 return sellerName === sellerValue;
             });
         }
@@ -758,78 +772,12 @@ class JumiaSKUFinder {
     }
 
     async handleExport() {
-        const btnText = this.exportBtn.textContent.trim();
-        
-        if (btnText.includes('Fetch')) {
-            await this.fetchExportData();
-        } else if (btnText.includes('Download')) {
-            this.downloadCSV();
-        }
-    }
-
-    async fetchExportData() {
         if (this.data.length === 0) {
-            alert('No data to fetch');
+            alert('No data to export');
             return;
         }
-        
-        this.showLoading('Preparing to fetch seller data...');
-        this.exportBtn.textContent = '⏳ Fetching...';
-        this.exportBtn.disabled = true;
-        
-        try {
-            // Fetch seller names for all products
-            const totalProducts = this.data.length;
-            let processedCount = 0;
-            let successCount = 0;
-            
-            for (let i = 0; i < this.data.length; i++) {
-                const product = this.data[i];
-                processedCount++;
-                
-                // Update loading message with progress
-                this.updateLoadingMessage(`Fetching seller data... ${processedCount}/${totalProducts} (${successCount} successful)`);
-                
-                // Only fetch if seller name is not already available or is just the brand
-                const currentSellerName = product.sellerName || product.seller?.name || product.shopGlobal?.name;
-                
-                if (!currentSellerName || currentSellerName === product.brand || currentSellerName === 'N/A') {
-                    console.log(`Fetching seller for SKU: ${product.sku}`);
-                    const sellerName = await this.fetchSellerNameFromProductPage(product.url);
-                    
-                    if (sellerName && sellerName !== product.brand) {
-                        this.data[i].sellerName = sellerName;
-                        successCount++;
-                        console.log(`✓ Found seller: ${sellerName} for SKU: ${product.sku}`);
-                    } else {
-                        // Fallback to existing data
-                        this.data[i].sellerName = product.shopGlobal?.name || product.brand || 'N/A';
-                        console.log(`✗ No seller found for SKU: ${product.sku}, using fallback: ${this.data[i].sellerName}`);
-                    }
-                } else {
-                    // Already has seller name
-                    this.data[i].sellerName = currentSellerName;
-                    successCount++;
-                    console.log(`✓ Already has seller: ${currentSellerName} for SKU: ${product.sku}`);
-                }
-                
-                // Delay to avoid rate limiting (500ms between requests)
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-            
-            console.log(`Fetching complete: ${successCount}/${totalProducts} products have seller names`);
-            this.hideLoading();
-            this.buildExportTable();
-            this.exportBtn.textContent = '📥 Download CSV';
-            this.exportBtn.disabled = false;
-        } catch (error) {
-            console.error('Export error:', error);
-            this.hideLoading();
-            alert('Error fetching seller data. Some seller names may be missing.');
-            this.buildExportTable();
-            this.exportBtn.textContent = '📥 Download CSV';
-            this.exportBtn.disabled = false;
-        }
+        this.buildExportTable();
+        this.downloadCSV();
     }
 
     buildExportTable() {
@@ -847,7 +795,7 @@ class JumiaSKUFinder {
             const newPrice = product.prices?.price || 'N/A';
             const stock = product.stock?.text || 'N/A';
             const url = this.domain + (product.url || '');
-            const sellerName = product.sellerName || product.shopGlobal?.name || product.brand || 'N/A';
+            const sellerName = this.getSellerDisplayName(product) || 'N/A';
             
             return `
                 <tr>
@@ -876,7 +824,7 @@ class JumiaSKUFinder {
         const headers = ['SKU', 'Name', 'Brand', 'Category', 'Rating', 'Image', 'URL', 'Old Price', 'New Price', 'Stock', 'Seller Name'];
         
         const rows = this.data.map(product => {
-            const sellerName = product.sellerName || product.shopGlobal?.name || product.brand || 'N/A';
+            const sellerName = this.getSellerDisplayName(product) || 'N/A';
             
             return [
                 product.sku,
@@ -959,7 +907,8 @@ class JumiaSKUFinder {
         }
         
         this.exportTableSection.classList.add('hidden');
-        this.exportBtn.textContent = '📥 Fetch Data';
+        this.exportBtn.textContent = '📥 Download CSV';
+        this.exportBtn.disabled = true;
         this.updateStats();
     }
 
@@ -1010,6 +959,12 @@ class JumiaSKUFinder {
         }
     }
 
+    buildPageUrl(baseUrl, pageNumber) {
+        const url = new URL(baseUrl);
+        url.searchParams.set('page', pageNumber);
+        return url.toString();
+    }
+
     lazyLoadImages() {
         const images = this.productsGrid.querySelectorAll('.lazy-image');
         
@@ -1027,6 +982,56 @@ class JumiaSKUFinder {
             
             images.forEach(img => imageObserver.observe(img));
         }
+    }
+
+    async ensureSellerNames(products) {
+        if (!products || products.length === 0) return;
+
+        await this.mapWithConcurrency(
+            products,
+            5,
+            async (product) => {
+                const currentSellerName = this.getSellerDisplayName(product);
+                const isInvalid = !currentSellerName || currentSellerName === 'N/A' || currentSellerName === product.brand;
+
+                if (isInvalid && product.url) {
+                    const sellerName = await this.fetchSellerNameFromProductPage(product.url);
+                    if (sellerName) {
+                        product.sellerName = sellerName;
+                    }
+                } else if (currentSellerName && !product.sellerName) {
+                    product.sellerName = currentSellerName;
+                }
+            }
+        );
+    }
+
+    async mapWithConcurrency(items, limit, worker) {
+        const results = new Array(items.length);
+        let index = 0;
+
+        const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+            while (index < items.length) {
+                const currentIndex = index;
+                index += 1;
+                results[currentIndex] = await worker(items[currentIndex], currentIndex);
+            }
+        });
+
+        await Promise.all(runners);
+        return results;
+    }
+
+    getSellerDisplayName(product) {
+        if (!product) return null;
+        return product.sellerName ||
+            product.seller?.name ||
+            product.seller?.displayName ||
+            product.shopGlobal?.name ||
+            product.shopGlobal?.displayName ||
+            product.shop?.name ||
+            product.shop?.displayName ||
+            null;
     }
 }
 
