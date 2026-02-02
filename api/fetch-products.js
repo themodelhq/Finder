@@ -55,10 +55,12 @@ export default async function handler(req, res) {
 
         // Extract products from the page (now async)
         const products = await extractProducts(html);
+        const meta = extractMeta(html);
 
         return res.status(200).json({
             products,
             count: products.length,
+            meta,
             source: 'api'
         });
 
@@ -192,6 +194,78 @@ async function extractProducts(html) {
         console.error('Extract products error:', error);
         return products;
     }
+}
+
+function extractMeta(html) {
+    const meta = {};
+    try {
+        const storePatterns = [
+            /window\.__STORE__\s*=\s*({[\s\S]*?});\s*<\/script/,
+            /window\.__STORE__\s*=\s*({[\s\S]*?});/,
+            /__STORE__\s*=\s*({[\s\S]*?});/
+        ];
+
+        for (const pattern of storePatterns) {
+            const storeMatch = html.match(pattern);
+            if (storeMatch) {
+                try {
+                    const storeData = JSON.parse(storeMatch[1]);
+                    const discovered = extractMetaFromStore(storeData);
+                    if (Object.keys(discovered).length > 0) {
+                        return discovered;
+                    }
+                } catch (e) {
+                    continue;
+                }
+            }
+        }
+
+        const totalProductsMatch = html.match(/"totalProducts"\s*:\s*(\d+)/i);
+        if (totalProductsMatch) {
+            meta.totalProducts = parseInt(totalProductsMatch[1], 10);
+        }
+        const totalPagesMatch = html.match(/"totalPages"\s*:\s*(\d+)/i);
+        if (totalPagesMatch) {
+            meta.totalPages = parseInt(totalPagesMatch[1], 10);
+        }
+        const pageSizeMatch = html.match(/"pageSize"\s*:\s*(\d+)/i);
+        if (pageSizeMatch) {
+            meta.pageSize = parseInt(pageSizeMatch[1], 10);
+        }
+        const pageMatch = html.match(/"page"\s*:\s*(\d+)/i);
+        if (pageMatch) {
+            meta.page = parseInt(pageMatch[1], 10);
+        }
+    } catch (error) {
+        return meta;
+    }
+    return meta;
+}
+
+function extractMetaFromStore(storeData) {
+    const meta = {};
+    const queue = [storeData];
+    const seen = new Set();
+    const wantedKeys = new Set(['totalProducts', 'totalPages', 'pageSize', 'page']);
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object') continue;
+        if (seen.has(current)) continue;
+        seen.add(current);
+
+        for (const [key, value] of Object.entries(current)) {
+            if (wantedKeys.has(key) && Number.isFinite(value)) {
+                meta[key] = value;
+            } else if (typeof value === 'object' && value !== null) {
+                queue.push(value);
+            }
+        }
+        if (Object.keys(meta).length >= wantedKeys.size) {
+            return meta;
+        }
+    }
+    return meta;
 }
 
 async function formatProducts(products) {

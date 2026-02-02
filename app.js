@@ -11,6 +11,7 @@ class JumiaSKUFinder {
         this.currentMode = 'find';
         this.country = '.com.ng';
         this.domain = 'https://www.jumia' + this.country;
+        this.lastFetchMeta = null;
         
         this.initElements();
         this.initListeners();
@@ -162,24 +163,38 @@ class JumiaSKUFinder {
         this.showLoading('Finding products...');
         
         try {
-            const pageUrls = Array.from({ length: pages }, (_, index) => {
-                const pageNumber = index + 1;
-                return this.buildPageUrl(url, pageNumber);
-            });
-            let processed = 0;
+            const firstPageUrl = this.buildPageUrl(url, 1);
+            const firstPageProducts = await this.fetchProducts(firstPageUrl);
+            this.data = firstPageProducts ? [...firstPageProducts] : [];
+            const totalPages = this.resolveTotalPages(pages, this.lastFetchMeta);
+            this.maxPages = totalPages;
+            this.currentPage = 1;
+            this.updateStats();
+            this.updateLoadingMessage(`Fetched ${this.data.length} products (1/${totalPages} pages)...`);
 
-            const pageResults = await this.mapWithConcurrency(
-                pageUrls,
-                8,
-                async (pageUrl) => {
-                    processed += 1;
-                    this.currentPage = processed;
-                    this.updateLoadingMessage(`Fetching page ${processed} of ${pages}...`);
-                    return await this.fetchProducts(pageUrl);
-                }
-            );
+            if (totalPages > 1) {
+                let processedPages = 1;
+                const pageUrls = Array.from({ length: totalPages - 1 }, (_, index) => {
+                    const pageNumber = index + 2;
+                    return { pageNumber, url: this.buildPageUrl(url, pageNumber) };
+                });
 
-            this.data = pageResults.flat().filter(Boolean);
+                await this.mapWithConcurrency(
+                    pageUrls,
+                    8,
+                    async ({ pageNumber, url: pageUrl }) => {
+                        const products = await this.fetchProducts(pageUrl);
+                        if (products && products.length > 0) {
+                            this.data.push(...products);
+                        }
+                        processedPages += 1;
+                        this.currentPage = processedPages;
+                        this.updateStats();
+                        this.updateLoadingMessage(`Fetched ${this.data.length} products (${processedPages}/${totalPages} pages)...`);
+                    }
+                );
+            }
+
             await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
@@ -269,6 +284,7 @@ class JumiaSKUFinder {
             }
             
             const result = await response.json();
+            this.lastFetchMeta = result.meta || null;
             
             if (result.products && result.products.length > 0) {
                 return result.products;
@@ -472,8 +488,11 @@ class JumiaSKUFinder {
                 
                 if (response.ok) {
                     const result = await response.json();
-                    // The API returns products, but we need the HTML for seller extraction
-                    // So we'll fall through to CORS proxy
+                    const apiProduct = result.products?.[0];
+                    const apiSellerName = this.getSellerDisplayName(apiProduct);
+                    if (apiSellerName) {
+                        return apiSellerName;
+                    }
                 }
             } catch (apiError) {
                 console.log('API not available for seller fetch, using CORS proxy...');
@@ -964,6 +983,20 @@ class JumiaSKUFinder {
         return url.toString();
     }
 
+    resolveTotalPages(requestedPages, meta) {
+        const metaPages = meta?.totalPages;
+        if (Number.isFinite(metaPages) && metaPages > 0) {
+            return Math.max(requestedPages, metaPages);
+        }
+        const totalProducts = meta?.totalProducts;
+        const pageSize = meta?.pageSize;
+        if (Number.isFinite(totalProducts) && Number.isFinite(pageSize) && pageSize > 0) {
+            const calculated = Math.ceil(totalProducts / pageSize);
+            return Math.max(requestedPages, calculated);
+        }
+        return requestedPages;
+    }
+
     lazyLoadImages() {
         const images = this.productsGrid.querySelectorAll('.lazy-image');
         
@@ -993,8 +1026,9 @@ class JumiaSKUFinder {
                 const currentSellerName = this.getSellerDisplayName(product);
                 const isInvalid = !currentSellerName || currentSellerName === 'N/A' || currentSellerName === product.brand;
 
-                if (isInvalid && product.url) {
-                    const sellerName = await this.fetchSellerNameFromProductPage(product.url);
+                if (isInvalid) {
+                    const lookupUrl = product.url || `/catalog/?q=${product.sku}`;
+                    const sellerName = await this.fetchSellerNameFromProductPage(lookupUrl);
                     if (sellerName) {
                         product.sellerName = sellerName;
                     }
