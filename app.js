@@ -208,6 +208,10 @@ class JumiaSKUFinder {
 
                 const expectedTotal = this.lastFetchMeta?.totalProducts;
                 if (Number.isFinite(expectedTotal) && this.data.length < expectedTotal) {
+                    const extraPages = [];
+                    for (let pageNumber = totalPages + 1; pageNumber <= totalPages + 3; pageNumber += 1) {
+                        extraPages.push({ pageNumber, url: this.buildPageUrl(url, pageNumber) });
+                    }
                     const retryPages = pageUrls
                         .filter(({ pageNumber }) => (pageCounts.get(pageNumber) || 0) === 0)
                         .map(({ pageNumber, url: pageUrl }) => ({ pageNumber, url: pageUrl }));
@@ -225,6 +229,24 @@ class JumiaSKUFinder {
                                         }
                                     });
                                     pageCounts.set(pageNumber, products.length);
+                                }
+                                this.updateLoadingMessage(`Fetched ${this.data.length} products (${processedPages}/${totalPages} pages)...`);
+                            }
+                        );
+                    }
+                    if (extraPages.length > 0 && this.data.length < expectedTotal) {
+                        await this.mapWithConcurrency(
+                            extraPages,
+                            6,
+                            async ({ pageNumber, url: pageUrl }) => {
+                                const products = await this.fetchProductsWithRetry(pageUrl, 4);
+                                if (products && products.length > 0) {
+                                    products.forEach(product => {
+                                        if (product?.sku && !seenSkus.has(product.sku)) {
+                                            seenSkus.add(product.sku);
+                                            this.data.push(product);
+                                        }
+                                    });
                                 }
                                 this.updateLoadingMessage(`Fetched ${this.data.length} products (${processedPages}/${totalPages} pages)...`);
                             }
@@ -269,7 +291,7 @@ class JumiaSKUFinder {
             let processed = 0;
             const results = await this.mapWithConcurrency(
                 this.skus,
-                18,
+                20,
                 async (sku) => {
                     processed += 1;
                     this.updateLoadingMessage(`Fetching SKU ${processed} of ${this.skus.length}...`);
@@ -1164,12 +1186,16 @@ class JumiaSKUFinder {
         if (missing.length > 0) {
             await this.mapWithConcurrency(
                 missing,
-                8,
+                10,
                 async (product) => {
                     const lookupUrl = product.url || `/catalog/?q=${product.sku}`;
                     let sellerName = await this.fetchSellerNameFromProductPage(lookupUrl);
                     if (!sellerName && product.sku && lookupUrl !== `/catalog/?q=${product.sku}`) {
                         sellerName = await this.fetchSellerNameFromProductPage(`/catalog/?q=${product.sku}`);
+                    }
+                    if (!sellerName && product.sku) {
+                        const catalogResults = await this.fetchProductsWithRetry(`${this.domain}/catalog/?q=${product.sku}`, 3);
+                        sellerName = this.getSellerDisplayName(catalogResults?.[0]) || sellerName;
                     }
                     if (sellerName) {
                         product.sellerName = sellerName;
