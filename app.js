@@ -170,7 +170,7 @@ class JumiaSKUFinder {
 
             const pageResults = await this.mapWithConcurrency(
                 pageUrls,
-                4,
+                8,
                 async (pageUrl) => {
                     processed += 1;
                     this.currentPage = processed;
@@ -216,7 +216,7 @@ class JumiaSKUFinder {
             let processed = 0;
             const results = await this.mapWithConcurrency(
                 this.skus,
-                6,
+                10,
                 async (sku) => {
                     processed += 1;
                     this.updateLoadingMessage(`Fetching SKU ${processed} of ${this.skus.length}...`);
@@ -283,7 +283,6 @@ class JumiaSKUFinder {
             // Fallback to CORS proxies
             const products = await this.fetchProductsWithCORS(url);
             if (products.length === 0) {
-                await new Promise(resolve => setTimeout(resolve, 200));
                 return await this.fetchProductsWithCORS(url);
             }
             return products;
@@ -989,7 +988,7 @@ class JumiaSKUFinder {
 
         await this.mapWithConcurrency(
             products,
-            5,
+            8,
             async (product) => {
                 const currentSellerName = this.getSellerDisplayName(product);
                 const isInvalid = !currentSellerName || currentSellerName === 'N/A' || currentSellerName === product.brand;
