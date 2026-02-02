@@ -186,7 +186,7 @@ class JumiaSKUFinder {
 
                 await this.mapWithConcurrency(
                     pageUrls,
-                    10,
+                    12,
                     async ({ pageNumber, url: pageUrl }) => {
                         const products = await this.fetchProductsWithRetry(pageUrl);
                         if (products && products.length > 0) {
@@ -241,7 +241,7 @@ class JumiaSKUFinder {
             let processed = 0;
             const results = await this.mapWithConcurrency(
                 this.skus,
-                10,
+                14,
                 async (sku) => {
                     processed += 1;
                     this.updateLoadingMessage(`Fetching SKU ${processed} of ${this.skus.length}...`);
@@ -474,12 +474,21 @@ class JumiaSKUFinder {
     extractSellerName(product) {
         // Check multiple possible locations for seller name
         if (product.sellerName) return product.sellerName;
+        if (product.displaySellerName) return product.displaySellerName;
         if (product.seller?.name) return product.seller.name;
         if (product.seller?.displayName) return product.seller.displayName;
+        if (product.seller?.sellerName) return product.seller.sellerName;
         if (product.shopGlobal?.name) return product.shopGlobal.name;
         if (product.shopGlobal?.displayName) return product.shopGlobal.displayName;
         if (product.shop?.name) return product.shop.name;
         if (product.shop?.displayName) return product.shop.displayName;
+        if (product.shop?.shopName) return product.shop.shopName;
+        if (product.store?.name) return product.store.name;
+        if (product.store?.displayName) return product.store.displayName;
+        if (product.supplier?.name) return product.supplier.name;
+        if (product.vendor?.name) return product.vendor.name;
+        if (product.sellerInfo?.name) return product.sellerInfo.name;
+        if (product.sellerInfo?.displayName) return product.sellerInfo.displayName;
         return null;
     }
 
@@ -539,6 +548,11 @@ class JumiaSKUFinder {
                 return null;
             }
             
+            const storeSeller = this.extractSellerFromStore(html);
+            if (storeSeller) {
+                return storeSeller;
+            }
+
             // Method 1: Extract from seller information section - most reliable
             // Pattern: <p class="-m -pbs">Seller Name</p> inside seller card
             const sellerCardMatch = html.match(/<a[^>]*href="[^"]*"[^>]*class="[^"]*-pas[^"]*-df[^"]*-i-ctr[^"]*-upp[^"]*"[^>]*>[\s\S]*?<h2[^>]*>Seller Information<\/h2>[\s\S]*?<\/a>[\s\S]*?<div[^>]*class="[^"]*-hr[^"]*-pas[^"]*"[^>]*>[\s\S]*?<p[^>]*class="[^"]*-m[^"]*-pbs[^"]*"[^>]*>(.*?)<\/p>/i);
@@ -827,7 +841,7 @@ class JumiaSKUFinder {
             const newPrice = product.prices?.price || 'N/A';
             const stock = product.stock?.text || 'N/A';
             const url = this.domain + (product.url || '');
-            const sellerName = this.getSellerDisplayName(product) || 'N/A';
+            const sellerName = this.getSellerDisplayName(product) || '';
             
             return `
                 <tr>
@@ -856,7 +870,7 @@ class JumiaSKUFinder {
         const headers = ['SKU', 'Name', 'Brand', 'Category', 'Rating', 'Image', 'URL', 'Old Price', 'New Price', 'Stock', 'Seller Name'];
         
         const rows = this.data.map(product => {
-            const sellerName = this.getSellerDisplayName(product) || 'N/A';
+            const sellerName = this.getSellerDisplayName(product) || '';
             
             return [
                 product.sku,
@@ -1044,7 +1058,7 @@ class JumiaSKUFinder {
         };
     }
 
-    async fetchProductsWithRetry(url, attempts = 2) {
+    async fetchProductsWithRetry(url, attempts = 3) {
         let lastError = null;
         for (let attempt = 0; attempt < attempts; attempt += 1) {
             try {
@@ -1086,7 +1100,7 @@ class JumiaSKUFinder {
 
         await this.mapWithConcurrency(
             products,
-            10,
+            12,
             async (product) => {
                 const currentSellerName = this.getSellerDisplayName(product);
                 const isInvalid = !currentSellerName || currentSellerName === 'N/A' || currentSellerName === product.brand;
@@ -1126,13 +1140,48 @@ class JumiaSKUFinder {
     getSellerDisplayName(product) {
         if (!product) return null;
         return product.sellerName ||
+            product.displaySellerName ||
             product.seller?.name ||
             product.seller?.displayName ||
+            product.seller?.sellerName ||
             product.shopGlobal?.name ||
             product.shopGlobal?.displayName ||
             product.shop?.name ||
             product.shop?.displayName ||
+            product.shop?.shopName ||
+            product.store?.name ||
+            product.store?.displayName ||
+            product.supplier?.name ||
+            product.vendor?.name ||
+            product.sellerInfo?.name ||
+            product.sellerInfo?.displayName ||
             null;
+    }
+
+    extractSellerFromStore(html) {
+        const storeMatch = html.match(/window\.__STORE__\s*=\s*({[\s\S]*?});/);
+        if (!storeMatch) return null;
+        try {
+            const storeData = JSON.parse(storeMatch[1]);
+            const queue = [storeData];
+            const seen = new Set();
+            while (queue.length > 0) {
+                const current = queue.shift();
+                if (!current || typeof current !== 'object') continue;
+                if (seen.has(current)) continue;
+                seen.add(current);
+                const sellerName = this.extractSellerName(current);
+                if (sellerName) return sellerName;
+                for (const value of Object.values(current)) {
+                    if (value && typeof value === 'object') {
+                        queue.push(value);
+                    }
+                }
+            }
+        } catch (error) {
+            return null;
+        }
+        return null;
     }
 }
 
