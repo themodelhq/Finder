@@ -184,11 +184,12 @@ class JumiaSKUFinder {
                     return { pageNumber, url: this.buildPageUrl(url, pageNumber) };
                 });
 
+                const pageCounts = new Map();
                 await this.mapWithConcurrency(
                     pageUrls,
-                    12,
+                    16,
                     async ({ pageNumber, url: pageUrl }) => {
-                        const products = await this.fetchProductsWithRetry(pageUrl);
+                        const products = await this.fetchProductsWithRetry(pageUrl, 3);
                         if (products && products.length > 0) {
                             products.forEach(product => {
                                 if (product?.sku && !seenSkus.has(product.sku)) {
@@ -197,12 +198,39 @@ class JumiaSKUFinder {
                                 }
                             });
                         }
+                        pageCounts.set(pageNumber, products?.length || 0);
                         processedPages += 1;
                         this.currentPage = processedPages;
                         this.updateStats();
                         this.updateLoadingMessage(`Fetched ${this.data.length} products (${processedPages}/${totalPages} pages)...`);
                     }
                 );
+
+                const expectedTotal = this.lastFetchMeta?.totalProducts;
+                if (Number.isFinite(expectedTotal) && this.data.length < expectedTotal) {
+                    const retryPages = pageUrls
+                        .filter(({ pageNumber }) => (pageCounts.get(pageNumber) || 0) === 0)
+                        .map(({ pageNumber, url: pageUrl }) => ({ pageNumber, url: pageUrl }));
+                    if (retryPages.length > 0) {
+                        await this.mapWithConcurrency(
+                            retryPages,
+                            8,
+                            async ({ pageNumber, url: pageUrl }) => {
+                                const products = await this.fetchProductsWithRetry(pageUrl, 4);
+                                if (products && products.length > 0) {
+                                    products.forEach(product => {
+                                        if (product?.sku && !seenSkus.has(product.sku)) {
+                                            seenSkus.add(product.sku);
+                                            this.data.push(product);
+                                        }
+                                    });
+                                    pageCounts.set(pageNumber, products.length);
+                                }
+                                this.updateLoadingMessage(`Fetched ${this.data.length} products (${processedPages}/${totalPages} pages)...`);
+                            }
+                        );
+                    }
+                }
             }
 
             await this.ensureSellerNames(this.data);
@@ -241,7 +269,7 @@ class JumiaSKUFinder {
             let processed = 0;
             const results = await this.mapWithConcurrency(
                 this.skus,
-                14,
+                18,
                 async (sku) => {
                     processed += 1;
                     this.updateLoadingMessage(`Fetching SKU ${processed} of ${this.skus.length}...`);
@@ -558,6 +586,16 @@ class JumiaSKUFinder {
             const sellerCardMatch = html.match(/<a[^>]*href="[^"]*"[^>]*class="[^"]*-pas[^"]*-df[^"]*-i-ctr[^"]*-upp[^"]*"[^>]*>[\s\S]*?<h2[^>]*>Seller Information<\/h2>[\s\S]*?<\/a>[\s\S]*?<div[^>]*class="[^"]*-hr[^"]*-pas[^"]*"[^>]*>[\s\S]*?<p[^>]*class="[^"]*-m[^"]*-pbs[^"]*"[^>]*>(.*?)<\/p>/i);
             if (sellerCardMatch && sellerCardMatch[1]) {
                 return sellerCardMatch[1].trim();
+            }
+
+            const sellerMetaMatch = html.match(/"seller"\s*:\s*\{[\s\S]*?"name"\s*:\s*"([^"]+)"/i);
+            if (sellerMetaMatch && sellerMetaMatch[1]) {
+                return sellerMetaMatch[1].trim();
+            }
+
+            const sellerByLabelMatch = html.match(/Seller(?:<\/[^>]+>|\s)*:?<\/[^>]*>\s*([^<]{2,})</i);
+            if (sellerByLabelMatch && sellerByLabelMatch[1]) {
+                return sellerByLabelMatch[1].trim();
             }
             
             // Method 2: Extract from Product Line specification
@@ -1058,7 +1096,7 @@ class JumiaSKUFinder {
         };
     }
 
-    async fetchProductsWithRetry(url, attempts = 3) {
+    async fetchProductsWithRetry(url, attempts = 4) {
         let lastError = null;
         for (let attempt = 0; attempt < attempts; attempt += 1) {
             try {
@@ -1098,9 +1136,10 @@ class JumiaSKUFinder {
     async ensureSellerNames(products) {
         if (!products || products.length === 0) return;
 
+        const missing = [];
         await this.mapWithConcurrency(
             products,
-            12,
+            16,
             async (product) => {
                 const currentSellerName = this.getSellerDisplayName(product);
                 const isInvalid = !currentSellerName || currentSellerName === 'N/A' || currentSellerName === product.brand;
@@ -1113,12 +1152,31 @@ class JumiaSKUFinder {
                     }
                     if (sellerName) {
                         product.sellerName = sellerName;
+                    } else {
+                        missing.push(product);
                     }
                 } else if (currentSellerName && !product.sellerName) {
                     product.sellerName = currentSellerName;
                 }
             }
         );
+
+        if (missing.length > 0) {
+            await this.mapWithConcurrency(
+                missing,
+                8,
+                async (product) => {
+                    const lookupUrl = product.url || `/catalog/?q=${product.sku}`;
+                    let sellerName = await this.fetchSellerNameFromProductPage(lookupUrl);
+                    if (!sellerName && product.sku && lookupUrl !== `/catalog/?q=${product.sku}`) {
+                        sellerName = await this.fetchSellerNameFromProductPage(`/catalog/?q=${product.sku}`);
+                    }
+                    if (sellerName) {
+                        product.sellerName = sellerName;
+                    }
+                }
+            );
+        }
     }
 
     async mapWithConcurrency(items, limit, worker) {
