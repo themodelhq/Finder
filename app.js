@@ -271,6 +271,7 @@ class JumiaSKUFinder {
                 }
             }
 
+            await this.fetchProductDetailsSequential(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateSKUList();
@@ -1439,6 +1440,33 @@ class JumiaSKUFinder {
                     }
                 }
             );
+        }
+    }
+
+    async fetchProductDetailsSequential(products) {
+        if (!products || products.length === 0) return;
+
+        const total = products.length;
+        for (let index = 0; index < total; index += 1) {
+            const product = products[index];
+            const position = index + 1;
+            this.updateLoadingMessage(`Fetching product details ${position}/${total}...`);
+
+            const lookupUrl = product.url || `/catalog/?q=${product.sku}`;
+            let sellerName = await this.fetchSellerNameFromProductPage(lookupUrl);
+
+            if (!sellerName && product.sku && lookupUrl !== `/catalog/?q=${product.sku}`) {
+                sellerName = await this.fetchSellerNameFromProductPage(`/catalog/?q=${product.sku}`);
+            }
+
+            if (!sellerName && product.sku) {
+                const catalogResults = await this.fetchProductsWithRetry(`${this.domain}/catalog/?q=${product.sku}`, 2);
+                sellerName = this.getSellerDisplayName(catalogResults?.[0]) || sellerName;
+            }
+
+            if (sellerName) {
+                product.sellerName = sellerName;
+            }
         }
     }
 
