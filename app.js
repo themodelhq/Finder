@@ -463,6 +463,12 @@ class JumiaSKUFinder {
                         }
                     }
                 }
+
+                // Method 2b: SvelteKit hydration payloads (kit.start(... { data: [...] }))
+                const svelteProducts = this.extractProductsFromSveltePayload(scriptContent);
+                if (svelteProducts.length > 0) {
+                    return svelteProducts;
+                }
             }
 
             // Method 3: Extract from data attributes in HTML
@@ -526,6 +532,65 @@ class JumiaSKUFinder {
                 shop: product.shop || null,
                 sellerName: this.extractSellerName(product)
             }));
+    }
+
+    extractProductsFromSveltePayload(scriptContent) {
+        const candidates = [];
+
+        const kitStartMatch = scriptContent.match(/kit\.start\([^,]+,[^,]+,\s*(\{[\s\S]*?\})\s*\);?/);
+        if (kitStartMatch?.[1]) {
+            candidates.push(kitStartMatch[1]);
+        }
+
+        const dataBlockMatch = scriptContent.match(/data\s*:\s*(\[[\s\S]*?\])\s*,\s*form\s*:/);
+        if (dataBlockMatch?.[1]) {
+            candidates.push(`{"data":${dataBlockMatch[1]}}`);
+        }
+
+        for (const candidate of candidates) {
+            try {
+                const normalized = candidate
+                    .replace(/([{,]\s*)([a-zA-Z_$][\w$]*)\s*:/g, '$1"$2":')
+                    .replace(/'/g, '"');
+                const parsed = JSON.parse(normalized);
+                const discovered = this.findProductArrays(parsed);
+                if (discovered.length > 0) {
+                    return this.formatProducts(discovered);
+                }
+            } catch (error) {
+                continue;
+            }
+        }
+
+        return [];
+    }
+
+    findProductArrays(input) {
+        if (!input || typeof input !== 'object') {
+            return [];
+        }
+
+        const queue = [input];
+        const seen = new Set();
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (!current || typeof current !== 'object' || seen.has(current)) {
+                continue;
+            }
+            seen.add(current);
+
+            if (Array.isArray(current)) {
+                if (current.length > 0 && current.every(item => item && typeof item === 'object' && item.sku)) {
+                    return current;
+                }
+                current.forEach(item => queue.push(item));
+            } else {
+                Object.values(current).forEach(value => queue.push(value));
+            }
+        }
+
+        return [];
     }
 
     extractSellerName(product) {

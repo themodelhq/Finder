@@ -135,6 +135,11 @@ async function extractProducts(html) {
                     }
                 }
             }
+
+            const svelteProducts = extractProductsFromSveltePayload(content);
+            if (svelteProducts.length > 0) {
+                return await formatProducts(svelteProducts);
+            }
         }
 
         // Method 3: Look for individual product objects with SKU
@@ -194,6 +199,65 @@ async function extractProducts(html) {
         console.error('Extract products error:', error);
         return products;
     }
+}
+
+function extractProductsFromSveltePayload(scriptContent) {
+    const candidates = [];
+
+    const kitStartMatch = scriptContent.match(/kit\.start\([^,]+,[^,]+,\s*(\{[\s\S]*?\})\s*\);?/);
+    if (kitStartMatch?.[1]) {
+        candidates.push(kitStartMatch[1]);
+    }
+
+    const dataBlockMatch = scriptContent.match(/data\s*:\s*(\[[\s\S]*?\])\s*,\s*form\s*:/);
+    if (dataBlockMatch?.[1]) {
+        candidates.push(`{"data":${dataBlockMatch[1]}}`);
+    }
+
+    for (const candidate of candidates) {
+        try {
+            const normalized = candidate
+                .replace(/([{,]\s*)([a-zA-Z_$][\w$]*)\s*:/g, '$1"$2":')
+                .replace(/'/g, '"');
+            const parsed = JSON.parse(normalized);
+            const discovered = findProductArrays(parsed);
+            if (discovered.length > 0) {
+                return discovered;
+            }
+        } catch (error) {
+            continue;
+        }
+    }
+
+    return [];
+}
+
+function findProductArrays(input) {
+    if (!input || typeof input !== 'object') {
+        return [];
+    }
+
+    const queue = [input];
+    const seen = new Set();
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || seen.has(current)) {
+            continue;
+        }
+        seen.add(current);
+
+        if (Array.isArray(current)) {
+            if (current.length > 0 && current.every(item => item && typeof item === 'object' && item.sku)) {
+                return current;
+            }
+            current.forEach(item => queue.push(item));
+        } else {
+            Object.values(current).forEach(value => queue.push(value));
+        }
+    }
+
+    return [];
 }
 
 function extractMeta(html) {
