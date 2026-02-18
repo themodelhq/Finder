@@ -442,6 +442,22 @@ class JumiaSKUFinder {
                 }
             }
 
+            // Method 1b: Legacy Jumia pattern - extract the full "products" array directly
+            const directProductsArray = this.extractArrayByKey(html, 'products');
+            if (directProductsArray) {
+                try {
+                    const products = JSON.parse(directProductsArray);
+                    if (Array.isArray(products) && products.length > 0) {
+                        const formatted = this.formatProducts(products);
+                        if (formatted.length > 0) {
+                            return formatted;
+                        }
+                    }
+                } catch (error) {
+                    // Continue to script-based fallbacks
+                }
+            }
+
             // Method 2: Look for products in script tags with improved extraction
             const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
             let scriptMatch;
@@ -451,6 +467,21 @@ class JumiaSKUFinder {
                 
                 // Skip if too short
                 if (scriptContent.length < 100) continue;
+
+                const preciseProductsArray = this.extractArrayByKey(scriptContent, 'products') || this.extractArrayByKey(scriptContent, 'items');
+                if (preciseProductsArray) {
+                    try {
+                        const products = JSON.parse(preciseProductsArray);
+                        if (Array.isArray(products) && products.length > 0 && (products[0].sku || products[0].name || products[0].id)) {
+                            const formatted = this.formatProducts(products);
+                            if (formatted.length > 0) {
+                                return formatted;
+                            }
+                        }
+                    } catch (error) {
+                        // Continue to regex fallbacks
+                    }
+                }
                 
                 // Look for products array with better patterns
                 const productsPatterns = [
@@ -516,6 +547,49 @@ class JumiaSKUFinder {
             console.error('Extract products error:', error);
             return [];
         }
+    }
+
+    extractArrayByKey(content, key) {
+        if (!content || !key) return null;
+        const keyPattern = new RegExp(`"?${key}"?\\s*:`);
+        const keyMatch = keyPattern.exec(content);
+        if (!keyMatch) return null;
+
+        const startSearchIndex = keyMatch.index + keyMatch[0].length;
+        const arrayStart = content.indexOf('[', startSearchIndex);
+        if (arrayStart === -1) return null;
+
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let i = arrayStart; i < content.length; i += 1) {
+            const ch = content[i];
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+
+            if (ch === '[') depth += 1;
+            if (ch === ']') {
+                depth -= 1;
+                if (depth === 0) {
+                    return content.slice(arrayStart, i + 1);
+                }
+            }
+        }
+
+        return null;
     }
 
     formatProducts(products) {

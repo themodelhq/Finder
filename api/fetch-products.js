@@ -199,7 +199,23 @@ async function extractProducts(html) {
             }
         }
 
-        // Method 2: Look for products JSON in script tags with better extraction
+        // Method 2: Legacy Jumia pattern - extract the complete products array
+        const directProductsArray = extractArrayByKey(html, 'products');
+        if (directProductsArray) {
+            try {
+                const parsed = JSON.parse(directProductsArray);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    const formattedProducts = await formatProducts(parsed);
+                    if (formattedProducts.length > 0) {
+                        return formattedProducts;
+                    }
+                }
+            } catch (error) {
+                // Continue to script parsing fallbacks
+            }
+        }
+
+        // Method 3: Look for products JSON in script tags with better extraction
         const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
         let match;
 
@@ -208,6 +224,21 @@ async function extractProducts(html) {
 
             // Skip if too short or doesn't contain product indicators
             if (content.length < 100) continue;
+
+            const preciseProductsArray = extractArrayByKey(content, 'products') || extractArrayByKey(content, 'items');
+            if (preciseProductsArray) {
+                try {
+                    const parsed = JSON.parse(preciseProductsArray);
+                    if (Array.isArray(parsed) && parsed.length > 0 && (parsed[0].sku || parsed[0].name || parsed[0].id)) {
+                        const formattedProducts = await formatProducts(parsed);
+                        if (formattedProducts.length > 0) {
+                            return formattedProducts;
+                        }
+                    }
+                } catch (error) {
+                    // fall through to regex variants
+                }
+            }
 
             // Try to find products array patterns with improved matching
             const productPatterns = [
@@ -243,7 +274,7 @@ async function extractProducts(html) {
             }
         }
 
-        // Method 3: Look for individual product objects with SKU
+        // Method 4: Look for individual product objects with SKU
         const skuPattern = /\{"sku"\s*:\s*"([A-Z0-9]+)"[^}]*"name"\s*:\s*"([^"]+)"[^}]*\}/g;
         let skuMatch;
 
@@ -273,7 +304,7 @@ async function extractProducts(html) {
             return products;
         }
 
-        // Method 4: Extract from data attributes in HTML
+        // Method 5: Extract from data attributes in HTML
         const dataSkuPattern = /data-sku=["']([A-Z0-9]+)["']/g;
         const skus = new Set();
         let dataMatch;
@@ -300,6 +331,49 @@ async function extractProducts(html) {
         console.error('Extract products error:', error);
         return products;
     }
+}
+
+function extractArrayByKey(content, key) {
+    if (!content || !key) return null;
+    const keyPattern = new RegExp(`"?${key}"?\\s*:`);
+    const keyMatch = keyPattern.exec(content);
+    if (!keyMatch) return null;
+
+    const startSearchIndex = keyMatch.index + keyMatch[0].length;
+    const arrayStart = content.indexOf('[', startSearchIndex);
+    if (arrayStart === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = arrayStart; i < content.length; i += 1) {
+        const ch = content[i];
+
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString) continue;
+
+        if (ch === '[') depth += 1;
+        if (ch === ']') {
+            depth -= 1;
+            if (depth === 0) {
+                return content.slice(arrayStart, i + 1);
+            }
+        }
+    }
+
+    return null;
 }
 
 function extractProductsFromSveltePayload(scriptContent) {
