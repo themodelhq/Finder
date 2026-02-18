@@ -43,6 +43,9 @@ class JumiaSKUFinder {
         this.discountFilter = document.getElementById('discountFilter');
         this.ratingFilter = document.getElementById('ratingFilter');
         this.oosFilter = document.getElementById('oosFilter');
+        this.categoryFilter = document.getElementById('categoryFilter');
+        this.tagFilter = document.getElementById('tagFilter');
+        this.expressFilter = document.getElementById('expressFilter');
         this.brandFilter = document.getElementById('brandFilter');
         this.sellerFilter = document.getElementById('sellerFilter');
         this.sortFilter = document.getElementById('sortFilter');
@@ -89,6 +92,9 @@ class JumiaSKUFinder {
         this.discountFilter.addEventListener('change', () => this.applyFilters());
         this.ratingFilter.addEventListener('change', () => this.applyFilters());
         this.oosFilter.addEventListener('change', () => this.applyFilters());
+        this.categoryFilter.addEventListener('change', () => this.applyFilters());
+        this.tagFilter.addEventListener('change', () => this.applyFilters());
+        this.expressFilter.addEventListener('change', () => this.applyFilters());
         this.brandFilter.addEventListener('change', () => this.applyFilters());
         this.sellerFilter.addEventListener('change', () => this.applyFilters());
         this.sortFilter.addEventListener('change', () => this.sortProducts());
@@ -499,6 +505,7 @@ class JumiaSKUFinder {
                 isShopGlobal: product.isShopGlobal || false,
                 isShopExpress: product.isShopExpress || false,
                 categories: product.categories || '',
+                tags: product.tags || product.tag || product.labels || product.label || [],
                 prices: {
                     rawPrice: product.prices?.rawPrice || '0',
                     price: product.prices?.price || '0',
@@ -659,7 +666,9 @@ class JumiaSKUFinder {
             brand: 'oos',
             sellerId: 0,
             isShopGlobal: true,
+            isShopExpress: false,
             categories: 'out of stock',
+            tags: [],
             prices: {
                 rawPrice: '0',
                 price: '₦ 0',
@@ -697,11 +706,41 @@ class JumiaSKUFinder {
         });
         
         this.productCount.textContent = this.data.length;
+        this.buildCategoryFilter();
+        this.buildTagFilter();
         this.buildBrandFilter();
         this.buildSellerFilter();
         this.exportBtn.textContent = '📥 Download CSV';
         this.exportBtn.disabled = false;
         this.lazyLoadImages();
+    }
+
+    buildCategoryFilter() {
+        const categories = [...new Set(this.originalData.flatMap(p => this.extractValues(p.categories)).filter(Boolean))];
+        categories.sort((a, b) => a.localeCompare(b));
+
+        let options = '<option value="0">All Categories</option>';
+        categories.forEach(category => {
+            options += `<option value="${category}">${category}</option>`;
+        });
+
+        this.categoryFilter.innerHTML = options;
+    }
+
+    buildTagFilter() {
+        const tags = [...new Set(this.originalData.flatMap(p => {
+            const normalizedTags = this.extractValues(p.tags || p.tag || p.labels || p.label || p.badges);
+            if (normalizedTags.length > 0) return normalizedTags;
+            return this.extractValues(p.categories);
+        }).filter(Boolean))];
+        tags.sort((a, b) => a.localeCompare(b));
+
+        let options = '<option value="0">All Tags</option>';
+        tags.forEach(tag => {
+            options += `<option value="${tag}">${tag}</option>`;
+        });
+
+        this.tagFilter.innerHTML = options;
     }
 
     buildBrandFilter() {
@@ -831,6 +870,30 @@ class JumiaSKUFinder {
             filtered = filtered.filter(p => {
                 return oosValue === 'oos' ? p.brand === 'oos' : p.brand !== 'oos';
             });
+        }
+
+        // Category filter
+        const categoryValue = this.categoryFilter.value;
+        if (categoryValue !== '0') {
+            filtered = filtered.filter(p => this.extractValues(p.categories).includes(categoryValue));
+        }
+
+        // Tag filter
+        const tagValue = this.tagFilter.value;
+        if (tagValue !== '0') {
+            filtered = filtered.filter(p => {
+                const tags = this.extractValues(p.tags || p.tag || p.labels || p.label || p.badges);
+                if (tags.length > 0) {
+                    return tags.includes(tagValue);
+                }
+                return this.extractValues(p.categories).includes(tagValue);
+            });
+        }
+
+        // Jumia express filter
+        const expressValue = this.expressFilter.value;
+        if (expressValue !== '0') {
+            filtered = filtered.filter(p => expressValue === 'express' ? !!p.isShopExpress : !p.isShopExpress);
         }
         
         // Brand filter
@@ -1022,9 +1085,26 @@ class JumiaSKUFinder {
         this.discountFilter.value = '0';
         this.ratingFilter.value = '0';
         this.oosFilter.value = '0';
+        this.categoryFilter.value = '0';
+        this.tagFilter.value = '0';
+        this.expressFilter.value = '0';
         this.brandFilter.value = '0';
         this.sellerFilter.value = '0';
         this.sortFilter.value = '0';
+    }
+
+    extractValues(value) {
+        if (!value) return [];
+        if (Array.isArray(value)) {
+            return value
+                .map(v => (typeof v === 'string' ? v : v?.name || v?.label || v?.value || ''))
+                .flatMap(v => this.extractValues(v));
+        }
+
+        return String(value)
+            .split(/[|,>/]+/)
+            .map(v => v.trim())
+            .filter(Boolean);
     }
 
     copyToClipboard(button) {

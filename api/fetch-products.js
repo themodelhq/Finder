@@ -268,22 +268,13 @@ function extractMetaFromStore(storeData) {
     return meta;
 }
 
-async function formatProducts(products) {
-    const filtered = products.filter(product => product && product.sku);
-    return await mapWithConcurrency(filtered, 6, async (product) => {
-        return await formatProduct(product);
-    });
+function formatProducts(products) {
+    return products
+        .filter(product => product && product.sku)
+        .map(product => formatProduct(product));
 }
 
-async function formatProduct(product) {
-    // First try to extract seller name from product data
-    let sellerName = extractSellerName(product);
-    
-    // If no seller name found and we have a product URL, fetch it from the product page
-    if (!sellerName && product.url) {
-        sellerName = await fetchSellerNameFromProductPage(product.url);
-    }
-    
+function formatProduct(product) {
     return {
         sku: product.sku || '',
         name: product.name || product.displayName || '',
@@ -292,6 +283,7 @@ async function formatProduct(product) {
         isShopGlobal: product.isShopGlobal || false,
         isShopExpress: product.isShopExpress || false,
         categories: product.categories || product.category || '',
+        tags: product.tags || product.tag || product.labels || product.label || [],
         prices: {
             rawPrice: product.prices?.rawPrice || product.rawPrice || '0',
             price: product.prices?.price || product.price || '0',
@@ -310,66 +302,8 @@ async function formatProduct(product) {
         seller: product.seller || null,
         shopGlobal: product.shopGlobal || null,
         shop: product.shop || null,
-        sellerName: sellerName
+        sellerName: extractSellerName(product)
     };
-}
-
-async function fetchSellerNameFromProductPage(productUrl) {
-    try {
-        // Construct full URL if relative path
-        const fullUrl = productUrl.startsWith('http') ? productUrl : `https://www.jumia.com.ng${productUrl}`;
-        
-        const response = await fetch(fullUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            }
-        });
-        
-        if (!response.ok) {
-            console.log(`Failed to fetch product page: ${response.status}`);
-            return null;
-        }
-        
-        const html = await response.text();
-        
-        // Method 1: Extract from seller information section - most reliable
-        // Pattern: <p class="-m -pbs">Seller Name</p> inside seller card
-        const sellerCardMatch = html.match(/<a[^>]*href="[^"]*"[^>]*class="[^"]*-pas[^"]*-df[^"]*-i-ctr[^"]*-upp[^"]*"[^>]*>[\s\S]*?<h2[^>]*>Seller Information<\/h2>[\s\S]*?<\/a>[\s\S]*?<div[^>]*class="[^"]*-hr[^"]*-pas[^"]*"[^>]*>[\s\S]*?<p[^>]*class="[^"]*-m[^"]*-pbs[^"]*"[^>]*>(.*?)<\/p>/i);
-        if (sellerCardMatch && sellerCardMatch[1]) {
-            return sellerCardMatch[1].trim();
-        }
-        
-        // Method 2: Extract from Product Line specification
-        const productLineMatch = html.match(/<span[^>]*class="[^"]*-b[^"]*"[^>]*>Product Line<\/span>\s*:\s*([^<]+)/i);
-        if (productLineMatch && productLineMatch[1]) {
-            return productLineMatch[1].trim();
-        }
-        
-        // Method 3: Extract from any seller link pattern
-        const sellerLinkMatch = html.match(/\/([^\/]+)\/"[^>]*class="[^"]*-pas[^"]*-df[^"]*-i-ctr[^"]*-upp[^"]*"[^>]*>[\s\S]*?Seller Information/i);
-        if (sellerLinkMatch && sellerLinkMatch[1]) {
-            // Decode URL-encoded seller name
-            return decodeURIComponent(sellerLinkMatch[1].replace(/-/g, ' '));
-        }
-        
-        // Method 4: Look for seller info in structured data
-        const structuredDataMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i);
-        if (structuredDataMatch) {
-            try {
-                const jsonData = JSON.parse(structuredDataMatch[1]);
-                if (jsonData.seller?.name) return jsonData.seller.name;
-                if (jsonData.brand?.name) return jsonData.brand.name;
-            } catch (e) {
-                // Continue to next method
-            }
-        }
-        
-        return null;
-    } catch (error) {
-        console.log(`Error fetching seller from product page: ${error.message}`);
-        return null;
-    }
 }
 
 function extractSellerName(product) {
