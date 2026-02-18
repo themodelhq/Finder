@@ -276,6 +276,11 @@ class JumiaSKUFinder {
             this.unsortedData = [...this.data];
             this.updateSKUList();
             this.renderProducts();
+            this.ensureSellerNames(this.data).then(() => {
+                this.renderProducts();
+            }).catch((error) => {
+                console.error('Seller enrichment failed:', error);
+            });
         } catch (error) {
             console.error('Error finding products:', error);
             alert('Error finding products. Please try again.');
