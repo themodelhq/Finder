@@ -177,6 +177,16 @@ class JumiaSKUFinder {
                 seenSkus.add(product.sku);
                 return true;
             });
+
+            if (this.data.length === 0 && !Number.isFinite(this.lastFetchMeta?.totalProducts)) {
+                this.currentPage = 1;
+                this.maxPages = 1;
+                this.updateStats();
+                this.updateSKUList();
+                this.renderProducts();
+                return;
+            }
+
             const totalPages = this.resolveTotalPages(pages, this.lastFetchMeta);
             this.maxPages = totalPages;
             this.currentPage = 1;
@@ -261,7 +271,7 @@ class JumiaSKUFinder {
                 }
             }
 
-            await this.ensureSellerNames(this.data);
+            await this.fetchProductDetailsSequential(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateSKUList();
@@ -320,11 +330,15 @@ class JumiaSKUFinder {
             );
 
             this.data = results.filter(p => p);
-            await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateStats();
             this.renderProducts();
+            this.ensureSellerNames(this.data).then(() => {
+                this.renderProducts();
+            }).catch((error) => {
+                console.error('Seller enrichment failed:', error);
+            });
             
         } catch (error) {
             console.error('Error previewing SKUs:', error);
@@ -424,6 +438,22 @@ class JumiaSKUFinder {
                 }
             }
 
+            // Method 1b: Legacy Jumia pattern - extract the full "products" array directly
+            const directProductsArray = this.extractArrayByKey(html, 'products');
+            if (directProductsArray) {
+                try {
+                    const products = JSON.parse(directProductsArray);
+                    if (Array.isArray(products) && products.length > 0) {
+                        const formatted = this.formatProducts(products);
+                        if (formatted.length > 0) {
+                            return formatted;
+                        }
+                    }
+                } catch (error) {
+                    // Continue to script-based fallbacks
+                }
+            }
+
             // Method 2: Look for products in script tags with improved extraction
             const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
             let scriptMatch;
@@ -433,6 +463,21 @@ class JumiaSKUFinder {
                 
                 // Skip if too short
                 if (scriptContent.length < 100) continue;
+
+                const preciseProductsArray = this.extractArrayByKey(scriptContent, 'products') || this.extractArrayByKey(scriptContent, 'items');
+                if (preciseProductsArray) {
+                    try {
+                        const products = JSON.parse(preciseProductsArray);
+                        if (Array.isArray(products) && products.length > 0 && (products[0].sku || products[0].name || products[0].id)) {
+                            const formatted = this.formatProducts(products);
+                            if (formatted.length > 0) {
+                                return formatted;
+                            }
+                        }
+                    } catch (error) {
+                        // Continue to regex fallbacks
+                    }
+                }
                 
                 // Look for products array with better patterns
                 const productsPatterns = [
@@ -463,6 +508,12 @@ class JumiaSKUFinder {
                         }
                     }
                 }
+
+                // Method 2b: SvelteKit hydration payloads (kit.start(... { data: [...] }))
+                const svelteProducts = this.extractProductsFromSveltePayload(scriptContent);
+                if (svelteProducts.length > 0) {
+                    return svelteProducts;
+                }
             }
 
             // Method 3: Extract from data attributes in HTML
@@ -492,6 +543,49 @@ class JumiaSKUFinder {
             console.error('Extract products error:', error);
             return [];
         }
+    }
+
+    extractArrayByKey(content, key) {
+        if (!content || !key) return null;
+        const keyPattern = new RegExp(`"?${key}"?\\s*:`);
+        const keyMatch = keyPattern.exec(content);
+        if (!keyMatch) return null;
+
+        const startSearchIndex = keyMatch.index + keyMatch[0].length;
+        const arrayStart = content.indexOf('[', startSearchIndex);
+        if (arrayStart === -1) return null;
+
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let i = arrayStart; i < content.length; i += 1) {
+            const ch = content[i];
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+
+            if (ch === '[') depth += 1;
+            if (ch === ']') {
+                depth -= 1;
+                if (depth === 0) {
+                    return content.slice(arrayStart, i + 1);
+                }
+            }
+        }
+
+        return null;
     }
 
     formatProducts(products) {
@@ -526,6 +620,65 @@ class JumiaSKUFinder {
                 shop: product.shop || null,
                 sellerName: this.extractSellerName(product)
             }));
+    }
+
+    extractProductsFromSveltePayload(scriptContent) {
+        const candidates = [];
+
+        const kitStartMatch = scriptContent.match(/kit\.start\([^,]+,[^,]+,\s*(\{[\s\S]*?\})\s*\);?/);
+        if (kitStartMatch?.[1]) {
+            candidates.push(kitStartMatch[1]);
+        }
+
+        const dataBlockMatch = scriptContent.match(/data\s*:\s*(\[[\s\S]*?\])\s*,\s*form\s*:/);
+        if (dataBlockMatch?.[1]) {
+            candidates.push(`{"data":${dataBlockMatch[1]}}`);
+        }
+
+        for (const candidate of candidates) {
+            try {
+                const normalized = candidate
+                    .replace(/([{,]\s*)([a-zA-Z_$][\w$]*)\s*:/g, '$1"$2":')
+                    .replace(/'/g, '"');
+                const parsed = JSON.parse(normalized);
+                const discovered = this.findProductArrays(parsed);
+                if (discovered.length > 0) {
+                    return this.formatProducts(discovered);
+                }
+            } catch (error) {
+                continue;
+            }
+        }
+
+        return [];
+    }
+
+    findProductArrays(input) {
+        if (!input || typeof input !== 'object') {
+            return [];
+        }
+
+        const queue = [input];
+        const seen = new Set();
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (!current || typeof current !== 'object' || seen.has(current)) {
+                continue;
+            }
+            seen.add(current);
+
+            if (Array.isArray(current)) {
+                if (current.length > 0 && current.every(item => item && typeof item === 'object' && item.sku)) {
+                    return current;
+                }
+                current.forEach(item => queue.push(item));
+            } else {
+                Object.values(current).forEach(value => queue.push(value));
+            }
+        }
+
+        return [];
     }
 
     extractSellerName(product) {
@@ -1282,6 +1435,33 @@ class JumiaSKUFinder {
                     }
                 }
             );
+        }
+    }
+
+    async fetchProductDetailsSequential(products) {
+        if (!products || products.length === 0) return;
+
+        const total = products.length;
+        for (let index = 0; index < total; index += 1) {
+            const product = products[index];
+            const position = index + 1;
+            this.updateLoadingMessage(`Fetching product details ${position}/${total}...`);
+
+            const lookupUrl = product.url || `/catalog/?q=${product.sku}`;
+            let sellerName = await this.fetchSellerNameFromProductPage(lookupUrl);
+
+            if (!sellerName && product.sku && lookupUrl !== `/catalog/?q=${product.sku}`) {
+                sellerName = await this.fetchSellerNameFromProductPage(`/catalog/?q=${product.sku}`);
+            }
+
+            if (!sellerName && product.sku) {
+                const catalogResults = await this.fetchProductsWithRetry(`${this.domain}/catalog/?q=${product.sku}`, 2);
+                sellerName = this.getSellerDisplayName(catalogResults?.[0]) || sellerName;
+            }
+
+            if (sellerName) {
+                product.sellerName = sellerName;
+            }
         }
     }
 
