@@ -177,6 +177,16 @@ class JumiaSKUFinder {
                 seenSkus.add(product.sku);
                 return true;
             });
+
+            if (this.data.length === 0 && !Number.isFinite(this.lastFetchMeta?.totalProducts)) {
+                this.currentPage = 1;
+                this.maxPages = 1;
+                this.updateStats();
+                this.updateSKUList();
+                this.renderProducts();
+                return;
+            }
+
             const totalPages = this.resolveTotalPages(pages, this.lastFetchMeta);
             this.maxPages = totalPages;
             this.currentPage = 1;
@@ -261,11 +271,15 @@ class JumiaSKUFinder {
                 }
             }
 
-            await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateSKUList();
             this.renderProducts();
+            this.ensureSellerNames(this.data).then(() => {
+                this.renderProducts();
+            }).catch((error) => {
+                console.error('Seller enrichment failed:', error);
+            });
         } catch (error) {
             console.error('Error finding products:', error);
             alert('Error finding products. Please try again.');
@@ -320,11 +334,15 @@ class JumiaSKUFinder {
             );
 
             this.data = results.filter(p => p);
-            await this.ensureSellerNames(this.data);
             this.originalData = [...this.data];
             this.unsortedData = [...this.data];
             this.updateStats();
             this.renderProducts();
+            this.ensureSellerNames(this.data).then(() => {
+                this.renderProducts();
+            }).catch((error) => {
+                console.error('Seller enrichment failed:', error);
+            });
             
         } catch (error) {
             console.error('Error previewing SKUs:', error);

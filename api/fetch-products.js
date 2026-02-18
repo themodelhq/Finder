@@ -54,8 +54,18 @@ export default async function handler(req, res) {
         const html = await response.text();
 
         // Extract products from the page (now async)
-        const products = await extractProducts(html);
-        const meta = extractMeta(html);
+        let products = await extractProducts(html);
+        let meta = extractMeta(html);
+
+        if (!products || products.length === 0) {
+            const svelteData = await fetchProductsFromSvelteData(url);
+            if (svelteData.products.length > 0) {
+                products = svelteData.products;
+            }
+            if (Object.keys(svelteData.meta).length > 0) {
+                meta = mergeMeta(meta, svelteData.meta);
+            }
+        }
 
         return res.status(200).json({
             products,
@@ -71,6 +81,97 @@ export default async function handler(req, res) {
             details: error.message
         });
     }
+}
+
+async function fetchProductsFromSvelteData(pageUrl) {
+    const candidates = buildSvelteDataUrls(pageUrl);
+
+    for (const candidate of candidates) {
+        try {
+            const response = await fetch(candidate, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json,text/plain,*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                }
+            });
+
+            if (!response.ok) {
+                continue;
+            }
+
+            const payload = await response.json();
+            const discoveredProducts = findProductArrays(payload);
+            const products = discoveredProducts.length > 0 ? await formatProducts(discoveredProducts) : [];
+            const meta = extractMetaFromObject(payload);
+
+            if (products.length > 0 || Object.keys(meta).length > 0) {
+                return { products, meta };
+            }
+        } catch (error) {
+            continue;
+        }
+    }
+
+    return { products: [], meta: {} };
+}
+
+function buildSvelteDataUrls(pageUrl) {
+    try {
+        const parsed = new URL(pageUrl);
+        const cleanPath = parsed.pathname.endsWith('/') ? parsed.pathname.slice(0, -1) : parsed.pathname;
+
+        const baseCandidates = new Set([
+            `${parsed.origin}${cleanPath}/__data.json${parsed.search}`,
+            `${parsed.origin}${parsed.pathname}/__data.json${parsed.search}`,
+            `${parsed.origin}${cleanPath}/__data.json?x-sveltekit-invalidated=001${parsed.search ? `&${parsed.search.slice(1)}` : ''}`
+        ]);
+
+        return Array.from(baseCandidates).filter(Boolean);
+    } catch (error) {
+        return [];
+    }
+}
+
+function extractMetaFromObject(input) {
+    const meta = {};
+    if (!input || typeof input !== 'object') return meta;
+
+    const queue = [input];
+    const seen = new Set();
+    const keys = ['totalProducts', 'totalPages', 'pageSize', 'page'];
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || seen.has(current)) continue;
+        seen.add(current);
+
+        if (Array.isArray(current)) {
+            current.forEach(item => queue.push(item));
+            continue;
+        }
+
+        for (const [key, value] of Object.entries(current)) {
+            if (keys.includes(key) && Number.isFinite(value)) {
+                meta[key] = value;
+            } else if (typeof value === 'object' && value !== null) {
+                queue.push(value);
+            }
+        }
+    }
+
+    return meta;
+}
+
+function mergeMeta(existing = {}, incoming = {}) {
+    return {
+        totalProducts: Math.max(existing.totalProducts || 0, incoming.totalProducts || 0) || undefined,
+        totalPages: Math.max(existing.totalPages || 0, incoming.totalPages || 0) || undefined,
+        pageSize: incoming.pageSize || existing.pageSize,
+        page: incoming.page || existing.page
+    };
 }
 
 async function extractProducts(html) {
